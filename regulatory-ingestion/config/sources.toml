@@ -1,0 +1,48 @@
+# Source URLs are operational configuration: add/remove listing pages here without
+# changing adapter or pipeline code. Each page can carry its own document type.
+
+[sources.rbi]
+adapter = "rbi"
+
+[[sources.rbi.pages]]
+url = "https://www.rbi.org.in/Scripts/NotificationUser.aspx"
+document_type = "notification"
+
+[sources.cbdt]
+adapter = "cbdt"
+
+[[sources.cbdt.pages]]
+url = "https://www.incometaxindia.gov.in/notifications"
+document_type = "notification"
+transport = "playwright"
+
+[[sources.cbdt.pages]]
+url = "https://www.incometaxindia.gov.in/circulars"
+document_type = "circular"
+transport = "playwright"
+
+[sources.sebi]
+adapter = "sebi"
+
+[[sources.sebi.pages]]
+url = "https://www.sebi.gov.in/sebiweb/home/HomeAction.do?doListing=yes&sid=6&ssid=25&smid=0"
+document_type = "public_notices"
+
+[[sources.sebi.pages]]
+url = "https://www.sebi.gov.in/sebiweb/home/HomeAction.do?doListing=yes&sid=6&ssid=23&smid=0"
+document_type = "press_release"
+
+[sources.gst]
+adapter = "gst"
+
+[[sources.gst.pages]]
+url = "https://www.gstcouncil.gov.in/cgst-tax-notification"
+document_type = "notification"
+
+[sources.mca]
+adapter = "mca"
+
+[[sources.mca.pages]]
+url = "https://www.mca.gov.in/content/mca/global/en/acts-rules/ebooks/circulars.html"
+document_type = "circular"
+transport = "playwright"

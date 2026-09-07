@@ -1,0 +1,16 @@
+from typing import Protocol
+
+from .domain import BaseRegulatoryDocument, RegulatoryDocument, RegulatorySource, RunSummary, Source
+
+
+class SourceAdapter(Protocol):
+    source: Source
+
+    def discover(self, limit: int) -> list[BaseRegulatoryDocument]: ...
+
+
+class DocumentRepository(Protocol):
+    def ensure_indexes(self) -> None: ...
+    def sync_sources(self, sources: list[RegulatorySource]) -> None: ...
+    def upsert(self, document: RegulatoryDocument) -> str: ...
+    def record_run(self, summary: RunSummary) -> None: ...

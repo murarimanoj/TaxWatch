@@ -36,7 +36,11 @@ class IngestionPipeline:
                     if candidate.metadata.get("transport") == "playwright":
                         if self.browser is None:
                             raise RuntimeError("Playwright transport is configured but unavailable")
-                        response = self.browser.get(target)
+                        referer = candidate.metadata.get("referer")
+                        if referer:
+                            response = self.browser.download(target, referer)
+                        else:
+                            response = self.browser.get(target)
                     else:
                         response = self.client.get(target)
                     content_type = response.headers.get("content-type", "application/octet-stream")

@@ -1,6 +1,9 @@
-import re
-
-from bs4 import Tag
+import json
+from base64 import b64encode
+from datetime import date
+from time import strptime
+from typing import Any
+from urllib.parse import urlencode
 
 from ..config import SourcePageConfig
 from ..domain import BaseRegulatoryDocument, Source
@@ -8,21 +11,25 @@ from .base import HtmlListingAdapter
 
 
 class McaAdapter(HtmlListingAdapter):
+    """Discover circular PDFs starting from the configured MCA page."""
+
     source = Source.MCA
+    _metadata_path = (
+        "/bin/ebook/service/documentMetadata"
+        "?docCategory=Circulars&flag=initial&status=Current"
+    )
+    _download_url = "https://www.mca.gov.in/bin/ebook/dms/getdocument"
 
     def discover(self, limit: int) -> list[BaseRegulatoryDocument]:
+        if self.browser is None:
+            raise RuntimeError("MCA discovery requires Playwright")
+
         results: list[BaseRegulatoryDocument] = []
         for page in self.pages:
-            if page.transport == "playwright":
-                if self.browser is None:
-                    raise RuntimeError("Playwright transport is configured but unavailable")
-                response = self.browser.get_with_popup_links(
-                    str(page.url),
-                    "#notificationCircularTable a.notifications.dmslink",
-                    limit,
-                )
-            else:
-                response = self.client.get(str(page.url))
+            response = self.browser.get_page_resource(
+                str(page.url),
+                self._metadata_path,
+            )
             results.extend(self.parse_listing(response.text, limit, page))
         return results
 
@@ -32,72 +39,71 @@ class McaAdapter(HtmlListingAdapter):
         limit: int,
         page: SourcePageConfig | None = None,
     ) -> list[BaseRegulatoryDocument]:
-        page = page or SourcePageConfig(
-            url="https://example.test/mca", document_type="circular"
-        )
-        soup = self.soup(html)
+        try:
+            payload: Any = json.loads(html)
+        except json.JSONDecodeError as exc:
+            raise ValueError("MCA metadata response is not valid JSON") from exc
+
+        records = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(records, list):
+            raise TypeError("MCA metadata response does not contain a data list")
+
+        parsed_records: list[tuple[date, dict[str, Any]]] = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            published_date = self._parse_date(record.get("notificationdate"))
+            if published_date is not None:
+                parsed_records.append((published_date, record))
+        parsed_records.sort(key=lambda item: item[0], reverse=True)
+
+        document_type = page.document_type if page else "circular"
+        transport = page.transport if page else "playwright"
         results: list[BaseRegulatoryDocument] = []
-        for row in soup.select("#notificationCircularTable tbody tr"):
-            cells = row.find_all("td")
-            link = self._document_link(row)
-            if link is None or not cells:
+        for published_date, record in parsed_records:
+            document_id = str(record.get("link", "")).strip()
+            title = " ".join(str(record.get("shortDescription", "")).split())
+            title = title.rstrip(" |").strip()
+            if not document_id or not title:
                 continue
 
-            date_text = self._date_text(cells)
-            title = self._title(cells, date_text)
-            if not title:
-                continue
-
+            document_url = self._document_url(document_id)
             results.append(
-                self.candidate(
+                BaseRegulatoryDocument(
+                    source=self.source,
                     title=title,
-                    href=link.get("data-document-url", "") or link.get("href", ""),
-                    date_text=date_text,
-                    document_type=page.document_type,
-                    base_url=str(page.url),
-                    transport=page.transport,
+                    published_date=published_date,
+                    document_type=document_type,
+                    detail_url=document_url,
+                    attachment_url=document_url,
+                    metadata={
+                        "transport": transport,
+                        "referer": str(page.url) if page else "",
+                    },
                 )
             )
             if len(results) >= limit:
                 break
         return results
 
-    @staticmethod
-    def _document_link(row: Tag) -> Tag | None:
-        for link in row.select("a[href]"):
-            if link.get("data-document-url"):
-                return link
-            href = link.get("href", "")
-            if re.search(r"getdocument|\.pdf(?:$|\?)", href, re.IGNORECASE):
-                return link
-        return None
-
-    def _date_text(self, cells: list[Tag]) -> str | None:
-        for cell in cells:
-            text = cell.get_text(" ", strip=True)
-            match = re.search(
-                r"\b(?:\d{1,2}[./-]\d{1,2}[./-]\d{4}|"
-                r"\d{1,2}[ -](?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
-                r"[a-z]*[ ,-]+\d{4})\b",
-                text,
-                flags=re.IGNORECASE,
-            )
-            if match is not None:
-                return match.group(0)
-        return None
+    @classmethod
+    def _document_url(cls, document_id: str) -> str:
+        encoded_id = b64encode(document_id.encode()).decode("ascii")
+        query = urlencode(
+            {
+                "doc": encoded_id,
+                "docCategory": "Circulars",
+                "actionType": "download",
+            }
+        )
+        return f"{cls._download_url}?{query}"
 
     @staticmethod
-    def _title(cells: list[Tag], date_text: str | None) -> str:
-        ignored = {"view", "download", "pdf", "open"}
-        candidates: list[str] = []
-        for cell in cells:
-            text = " ".join(cell.get_text(" ", strip=True).split()).rstrip(" |")
-            if (
-                not text
-                or text == date_text
-                or text.lower() in ignored
-                or text.isdigit()
-            ):
-                continue
-            candidates.append(text)
-        return max(candidates, key=len, default="")
+    def _parse_date(value: object) -> date | None:
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = strptime(value.strip(), "%m/%d/%Y")
+        except ValueError:
+            return None
+        return date(parsed.tm_year, parsed.tm_mon, parsed.tm_mday)

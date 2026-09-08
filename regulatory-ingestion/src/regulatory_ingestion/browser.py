@@ -1,6 +1,9 @@
 from dataclasses import dataclass
+from time import monotonic
+from urllib.parse import urljoin
 
 from playwright.sync_api import Browser, BrowserContext, Playwright, sync_playwright
+from playwright.sync_api import Response as PlaywrightResponse
 from playwright_stealth import Stealth
 
 
@@ -25,8 +28,10 @@ class BrowserClient:
         user_agent: str,
         headless: bool = False,
         channel: str = "chrome",
+        popup_timeout_seconds: float = 90,
     ) -> None:
         self._timeout_ms = timeout_seconds * 1000
+        self._popup_timeout_ms = popup_timeout_seconds * 1000
         self._user_agent = user_agent
         self._headless = headless
         self._channel = channel
@@ -81,6 +86,26 @@ class BrowserClient:
         finally:
             page.close()
 
+    def download(self, url: str, referer: str) -> BrowserResponse:
+        """Download bytes using the active browser session and source referrer."""
+        response = self._start().request.get(
+            url,
+            headers={"Referer": referer},
+            timeout=self._timeout_ms,
+        )
+        if not response.ok:
+            raise RuntimeError(
+                f"Browser download returned HTTP {response.status} for {url}"
+            )
+        return BrowserResponse(
+            content=response.body(),
+            headers={
+                key.lower(): value for key, value in response.headers.items()
+            },
+            status_code=response.status,
+            url=response.url,
+        )
+
     def get_with_popup_links(
         self, url: str, button_selector: str, limit: int
     ) -> BrowserResponse:
@@ -97,7 +122,9 @@ class BrowserClient:
             for index in range(min(buttons.count(), limit)):
                 button = buttons.nth(index)
                 try:
-                    with page.context.expect_page(timeout=self._timeout_ms) as popup_info:
+                    with page.context.expect_page(
+                        timeout=self._popup_timeout_ms
+                    ) as popup_info:
                         button.click()
                     popup = popup_info.value
                     popup.wait_for_load_state("domcontentloaded")
@@ -113,6 +140,99 @@ class BrowserClient:
                     ) from exc
             headers = {key.lower(): value for key, value in response.headers.items()}
             return BrowserResponse(page.content().encode(), headers, response.status, page.url)
+        finally:
+            page.close()
+
+    def capture_response(
+        self,
+        page_url: str,
+        response_url_contains: str,
+    ) -> BrowserResponse:
+        """Capture a dynamic response before its page redirects or redraws."""
+        page = self._start().new_page()
+        captured: list[BrowserResponse] = []
+
+        def capture(response: PlaywrightResponse) -> None:
+            if response_url_contains not in response.url or captured:
+                return
+            captured.append(
+                BrowserResponse(
+                    content=response.body(),
+                    headers={
+                        key.lower(): value
+                        for key, value in response.headers.items()
+                    },
+                    status_code=response.status,
+                    url=response.url,
+                )
+            )
+
+        page.on("response", capture)
+        try:
+            response = page.goto(page_url, wait_until="domcontentloaded")
+            if response is None:
+                raise RuntimeError(
+                    f"Browser navigation returned no response for {page_url}"
+                )
+            deadline = monotonic() + (self._timeout_ms / 1000)
+            while not captured and monotonic() < deadline:
+                page.wait_for_timeout(250)
+            if not captured:
+                raise RuntimeError(
+                    f"Did not receive a response containing "
+                    f"{response_url_contains!r} from {page_url}"
+                )
+            return captured[0]
+        finally:
+            page.close()
+
+    def get_page_resource(
+        self,
+        page_url: str,
+        resource_path: str,
+    ) -> BrowserResponse:
+        """Fetch a same-origin resource after opening its configured page."""
+        page = self._start().new_page()
+        resource_url = urljoin(page_url, resource_path)
+        try:
+            response = page.goto(page_url, wait_until="domcontentloaded")
+            if response is None:
+                raise RuntimeError(
+                    f"Browser navigation returned no response for {page_url}"
+                )
+            result = page.evaluate(
+                """
+                async (url) => {
+                    const response = await fetch(url, {credentials: "include"});
+                    return {
+                        body: await response.text(),
+                        headers: Object.fromEntries(response.headers.entries()),
+                        status: response.status,
+                        url: response.url,
+                    };
+                }
+                """,
+                resource_url,
+            )
+            if not isinstance(result, dict):
+                raise TypeError(
+                    f"Browser returned an invalid response for {resource_url}"
+                )
+            status = int(result.get("status", 0))
+            if status >= 400:
+                raise RuntimeError(
+                    f"Browser request returned HTTP {status} for {resource_url}"
+                )
+            headers = {
+                str(key).lower(): str(value)
+                for key, value in dict(result.get("headers", {})).items()
+            }
+            return BrowserResponse(
+                content=str(result.get("body", "")).encode(),
+                headers=headers,
+                status_code=status,
+                url=str(result.get("url", resource_url)),
+            )
         finally:
             page.close()
 

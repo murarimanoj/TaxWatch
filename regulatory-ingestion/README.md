@@ -130,6 +130,7 @@ load automatically from `.env`; exported environment variables take precedence.
 | `MAX_ITEMS_PER_RUN` | No | `25` | Default discovery limit |
 | `PLAYWRIGHT_HEADLESS` | No | `false` | CBDT blocks headless execution; headed Chrome is the working default |
 | `PLAYWRIGHT_CHANNEL` | No | `chrome` | Installed browser channel used by Playwright |
+| `PLAYWRIGHT_POPUP_TIMEOUT_SECONDS` | No | `90` | Maximum wait for a browser-driven document link to open |
 | `PLAYWRIGHT_USER_AGENT` | No | Chrome-compatible value | User-agent used by browser-backed sources |
 
 Alternatively, load credentials from an external file (replace the path below):
@@ -165,7 +166,8 @@ transport = "playwright"
 
 Add another page for a supported regulator with a `[[sources.<name>.pages]]`
 entry. `transport` defaults to `http`; set it to `playwright` for a JavaScript or
-WAF-sensitive listing. No pipeline change is required.
+WAF-sensitive listing. Use `timeout_seconds` when a specific page needs a longer
+timeout than `HTTP_TIMEOUT_SECONDS`. No pipeline change is required.
 
 ## Database initialization
 

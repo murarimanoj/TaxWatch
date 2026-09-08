@@ -11,6 +11,7 @@ class SourcePageConfig(BaseModel):
     url: HttpUrl
     document_type: str
     transport: Literal["http", "playwright"] = "http"
+    timeout_seconds: float | None = Field(default=None, gt=0)
 
 
 class SourceConfig(BaseModel):
@@ -33,6 +34,7 @@ class Settings(BaseSettings):
     source_config_path: Path = Path("config/sources.toml")
     playwright_headless: bool = False
     playwright_channel: str = "chrome"
+    playwright_popup_timeout_seconds: float = Field(default=90, gt=0)
     playwright_user_agent: str = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"

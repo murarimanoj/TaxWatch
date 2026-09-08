@@ -32,11 +32,20 @@ def execute(
             str(exc), param_hint="--document-type"
         ) from exc
     needs_browser = any(page.transport == "playwright" for page in pages)
+    browser_timeout = max(
+        (
+            page.timeout_seconds or settings.http_timeout_seconds
+            for page in pages
+            if page.transport == "playwright"
+        ),
+        default=settings.http_timeout_seconds,
+    )
     browser = BrowserClient(
-        settings.http_timeout_seconds,
+        browser_timeout,
         settings.playwright_user_agent,
         settings.playwright_headless,
         settings.playwright_channel,
+        settings.playwright_popup_timeout_seconds,
     ) if needs_browser else None
     if dry_run:
         repository = NullDocumentRepository()

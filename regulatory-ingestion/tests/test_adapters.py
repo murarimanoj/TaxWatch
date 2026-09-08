@@ -29,10 +29,22 @@ class Client:
         return Response(self.text)
 
 
+class McaBrowser:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.page_url: str | None = None
+        self.resource_path: str | None = None
+
+    def get_page_resource(self, page_url: str, resource_path: str) -> Response:
+        self.page_url = page_url
+        self.resource_path = resource_path
+        return Response(self.text)
+
+
 @pytest.mark.parametrize(
     ("adapter_type", "fixture", "source", "expected_title"),
     [
-        (RbiAdapter, "rbi.html", Source.RBI, "Digital Lending Directions"),
+        (RbiAdapter, "rbi.xml", Source.RBI, "Digital Lending Directions"),
         (CbdtAdapter, "cbdt.html", Source.CBDT, "Notification No. 117/2026"),
         (SebiAdapter, "sebi.html", Source.SEBI, "KYC framework update"),
         (
@@ -43,9 +55,12 @@ class Client:
         ),
         (
             McaAdapter,
-            "mca.html",
+            "mca.json",
             Source.MCA,
-            "General Circular No. 05/2024 - Extension of time for filing PAS-7",
+            (
+                "General Circular No. 04/2026 - Extension of Companies Compliance "
+                "Facilitation Scheme, 2026"
+            ),
         ),
     ],
 )
@@ -67,16 +82,49 @@ def test_candidate_preserves_configured_transport():
     assert results[0].metadata["transport"] == "playwright"
 
 
-def test_rbi_listing_uses_date_from_group_header():
+def test_mca_document_url_uses_encoded_download_identifier():
+    adapter = McaAdapter(client=None, pages=[])
+
+    result = adapter.parse_listing(
+        (FIXTURES / "mca.json").read_text(), limit=1
+    )[0]
+
+    assert str(result.detail_url).endswith(
+        "doc=MTIzNDU%3D&docCategory=Circulars&actionType=download"
+    )
+
+
+def test_mca_discovery_opens_the_configured_url():
+    configured_url = (
+        "https://www.mca.gov.in/content/mca/global/en/"
+        "acts-rules/ebooks/circulars.html"
+    )
+    page = SourcePageConfig(
+        url=configured_url,
+        document_type="circular",
+        transport="playwright",
+    )
+    browser = McaBrowser((FIXTURES / "mca.json").read_text())
+    adapter = McaAdapter(client=None, pages=[page], browser=browser)  # type: ignore[arg-type]
+
+    results = adapter.discover(limit=1)
+
+    assert len(results) == 1
+    assert browser.page_url == configured_url
+    assert browser.resource_path is not None
+    assert browser.resource_path.startswith("/bin/ebook/service/documentMetadata")
+
+
+def test_rbi_listing_uses_rss_publication_date():
     adapter = RbiAdapter(client=None, pages=[])
 
-    results = adapter.parse_listing((FIXTURES / "rbi.html").read_text(), limit=1)
+    results = adapter.parse_listing((FIXTURES / "rbi.xml").read_text(), limit=1)
 
     assert results[0].published_date == date(2026, 8, 20)
 
 
 def test_discover_applies_limit_to_each_configured_page():
-    html = (FIXTURES / "rbi.html").read_text()
+    html = (FIXTURES / "rbi.xml").read_text()
     pages = [
         SourcePageConfig(
             url="https://example.test/rbi/notifications",

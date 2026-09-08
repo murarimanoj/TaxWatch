@@ -5,7 +5,7 @@
 adapter = "rbi"
 
 [[sources.rbi.pages]]
-url = "https://www.rbi.org.in/Scripts/NotificationUser.aspx"
+url = "https://rbi.org.in/notifications_rss.xml"
 document_type = "notification"
 
 [sources.cbdt]
@@ -46,3 +46,4 @@ adapter = "mca"
 url = "https://www.mca.gov.in/content/mca/global/en/acts-rules/ebooks/circulars.html"
 document_type = "circular"
 transport = "playwright"
+timeout_seconds = 60

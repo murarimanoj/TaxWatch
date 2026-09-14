@@ -121,8 +121,14 @@ def test_overview_counts_and_failed_run() -> None:
         "failed": 1,
     }
     result = DashboardRepository(database).overview()
-    assert result.total == 12
-    assert len(result.authorities) == 4
+    assert result.total == 15
+    assert {item.source.value for item in result.authorities} == {
+        "rbi",
+        "cbdt",
+        "sebi",
+        "gst",
+        "mca",
+    }
     assert all(item.last_run_status == "failed" for item in result.authorities)
     assert all(item.last_checked_at == checked for item in result.authorities)
     assert all(item.latest_year is None for item in result.authorities)
@@ -144,3 +150,91 @@ def test_document_detail_serializes_existing_bson(
     assert response.status_code == 200
     assert response.json()["published_date"] == "2026-09-01T00:00:00Z"
     assert response.json()["content"] == "Extracted publication text"
+
+
+@pytest.mark.parametrize("query", ["", "?source=mca"])
+def test_mca_document_listing(query: str) -> None:
+    database = MagicMock()
+    database.regulatory_documents.count_documents.return_value = 1
+    database.regulatory_documents.aggregate.return_value = [
+        {
+            "source": "mca",
+            "document_hash": "mca-document",
+            "title": "MCA notification",
+            "document_type": "notification",
+            "detail_url": "https://www.mca.gov.in/notification",
+            "published_date": datetime(2026, 9, 1, tzinfo=UTC),
+            "excerpt": "MCA publication text",
+        }
+    ]
+    app = create_app(Settings(_env_file=None, mongodb_uri=None))
+    app.dependency_overrides[get_repository] = lambda: DashboardRepository(database)
+    with TestClient(app) as client:
+        response = client.get(f"/api/documents{query}")
+    assert response.status_code == 200
+    assert response.json()["items"][0]["source"] == "mca"
+    filters = {"source": "mca"} if query else {}
+    database.regulatory_documents.count_documents.assert_called_once_with(filters)
+
+
+def test_mca_detail(client: TestClient, repository: MagicMock) -> None:
+    repository.detail.return_value = {
+        "source": "mca",
+        "document_hash": "mca-document",
+        "title": "MCA notification",
+        "document_type": "notification",
+        "detail_url": "https://www.mca.gov.in/notification",
+        "content": "MCA publication text",
+    }
+    response = client.get("/api/documents/mca/mca-document")
+    assert response.status_code == 200
+    assert response.json()["source"] == "mca"
+    repository.detail.assert_called_once_with(Authority.MCA, "mca-document")
+
+
+@pytest.mark.parametrize("year", [None, 2026])
+def test_overview_passes_year(
+    client: TestClient, repository: MagicMock, year: int | None
+) -> None:
+    repository.overview.return_value = Overview(total=0, authorities=[])
+    response = client.get("/api/overview", params={"year": year} if year else {})
+    assert response.status_code == 200
+    repository.overview.assert_called_once_with(year=year)
+
+
+@pytest.mark.parametrize("year", [1899, 9999, "invalid"])
+def test_overview_rejects_invalid_year(client: TestClient, year: int | str) -> None:
+    assert client.get("/api/overview", params={"year": year}).status_code == 422
+
+
+def test_overview_filters_counts_and_previews_by_year() -> None:
+    database = MagicMock()
+    database.regulatory_documents.count_documents.return_value = 2
+    database.regulatory_documents.aggregate.return_value = []
+    database.ingestion_runs.find_one.return_value = None
+    result = DashboardRepository(database).overview(year=2026)
+    assert result.total == 2 * len(Authority)
+    count_filters = [
+        call.args[0]
+        for call in database.regulatory_documents.count_documents.call_args_list
+    ]
+    preview_filters = [
+        call.args[0][0]["$match"]
+        for call in database.regulatory_documents.aggregate.call_args_list
+    ]
+    assert count_filters == preview_filters
+    assert all(
+        call.args[0][3] == {"$limit": 3}
+        for call in database.regulatory_documents.aggregate.call_args_list
+    )
+    assert {item["source"] for item in count_filters} == {
+        source.value for source in Authority
+    }
+    assert all(
+        item["published_date"]
+        == {
+            "$gte": datetime(2026, 1, 1, tzinfo=UTC),
+            "$lt": datetime(2027, 1, 1, tzinfo=UTC),
+        }
+        for item in count_filters
+    )

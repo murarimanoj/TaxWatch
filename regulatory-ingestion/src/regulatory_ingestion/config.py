@@ -39,6 +39,12 @@ class Settings(BaseSettings):
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
     )
+    embeddings_enabled: bool = False
+    openai_api_key: str | None = None
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimensions: int = Field(default=1536, gt=0)
+    chunk_size_chars: int = Field(default=2400, gt=0)
+    chunk_overlap_chars: int = Field(default=300, ge=0)
 
 
 def load_source_catalog(path: Path) -> SourceCatalog:

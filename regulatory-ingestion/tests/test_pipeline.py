@@ -18,6 +18,7 @@ class Adapter:
             )
         ]
 
+
 class Response:
     content = b"<html><main>Regulatory content</main></html>"
     headers: ClassVar[dict[str, str]] = {"content-type": "text/html"}
@@ -37,6 +38,8 @@ class Repository:
     def __init__(self):
         self.documents = []
         self.runs = []
+        self.chunks = []
+        self.current = False
 
     def upsert(self, document):
         self.documents.append(document)
@@ -44,6 +47,24 @@ class Repository:
 
     def record_run(self, summary):
         self.runs.append(summary)
+
+    def chunks_current(self, document, model, expected_count):
+        return self.current
+
+    def replace_chunks(self, document, chunks):
+        self.chunks = chunks
+
+
+class Embedder:
+    model = "test-embedding"
+    dimensions = 3
+
+    def __init__(self):
+        self.calls = 0
+
+    def embed(self, texts):
+        self.calls += 1
+        return [[1.0, 0.0, 0.0] for _ in texts]
 
 
 def test_pipeline_ingests_and_records_run():
@@ -60,3 +81,28 @@ def test_pipeline_ingests_and_records_run():
         "295ba84869cdc2c1c42ffeea1811895a1e4e20d7d29d4278b09dfe6f3eacd7d6"
     )
     assert repository.runs == [summary]
+
+
+def test_pipeline_writes_and_skips_current_chunks():
+    repository = Repository()
+    embedder = Embedder()
+    pipeline = IngestionPipeline(
+        Adapter(),
+        Client(),
+        Extractor(),
+        repository,
+        embedder=embedder,
+        chunk_size=20,
+        chunk_overlap=5,
+    )
+    first = pipeline.run(10)
+    assert first.chunks_written > 0
+    assert all(
+        chunk.document_hash == repository.documents[0].document_hash
+        for chunk in repository.chunks
+    )
+    assert all(chunk.embedding == [1.0, 0.0, 0.0] for chunk in repository.chunks)
+    repository.current = True
+    second = pipeline.run(10)
+    assert second.chunks_written == 0
+    assert embedder.calls == 1

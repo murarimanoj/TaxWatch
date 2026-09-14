@@ -1,4 +1,4 @@
-export type Authority = 'rbi' | 'cbdt' | 'sebi' | 'gst';
+export type Authority = 'rbi' | 'cbdt' | 'sebi' | 'gst' | 'mca';
 export interface Document {
   source: Authority;
   document_hash: string;
@@ -26,4 +26,20 @@ export async function request<T>(path: string, signal: AbortSignal): Promise<T> 
 export function safeUrl(value: string): string | undefined {
   try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) ? url.href : undefined; }
   catch { return undefined; }
+}
+
+
+export interface ChatCitation { id: string; source: Authority; document_hash: string; title: string; url: string; published_date: string | null; passage: string }
+export interface ChatAnswer { answer: string; citations: ChatCitation[]; insufficient_evidence: boolean; source: Authority | null }
+export interface ChatMessage { role: 'user' | 'assistant'; content: string }
+export async function askQuestion(question: string, source: Authority | null, history: ChatMessage[], signal: AbortSignal, year: number | null = null): Promise<ChatAnswer> {
+  const response = await fetch(`${base}/api/chat`, {
+    method: 'POST', signal, headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ question, source, year, history }),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => null);
+    throw new Error(typeof data?.detail === 'string' ? data.detail : 'Unable to answer right now. Please try again.');
+  }
+  return response.json();
 }

@@ -3,10 +3,17 @@ from enum import Enum
 from typing import Any
 
 from pydantic import AnyUrl
-from pymongo import ASCENDING, MongoClient
+from pymongo import ASCENDING, MongoClient, ReplaceOne
+from pymongo.operations import SearchIndexModel
 
 from .config import SourceCatalog
-from .domain import RegulatoryDocument, RegulatorySource, RunSummary, Source
+from .domain import (
+    DocumentChunk,
+    RegulatoryDocument,
+    RegulatorySource,
+    RunSummary,
+    Source,
+)
 from .hashing import document_hash
 
 
@@ -33,7 +40,9 @@ def configured_sources(catalog: SourceCatalog) -> list[RegulatorySource]:
         authority = Source(authority_name)
         category_counts: dict[str, int] = {}
         for page in source_config.pages:
-            category_counts[page.document_type] = category_counts.get(page.document_type, 0) + 1
+            category_counts[page.document_type] = (
+                category_counts.get(page.document_type, 0) + 1
+            )
             ordinal = category_counts[page.document_type]
             suffix = "" if ordinal == 1 else f"_{ordinal}"
             records.append(
@@ -56,6 +65,12 @@ class MongoDocumentRepository:
         self._documents = self._db.regulatory_documents
         self._runs = self._db.ingestion_runs
         self._sources = self._db.regulatory_sources
+        self._chunks = self._db.document_chunks
+        self._artifacts = self._db.document_artifacts
+        self._provisions = self._db.regulatory_provisions
+        self._relationships = self._db.document_relationships
+        self._jobs = self._db.ingestion_jobs
+        self._processing_runs = self._db.processing_runs
 
     def ensure_indexes(self) -> None:
         for record in self._documents.find(
@@ -86,13 +101,57 @@ class MongoDocumentRepository:
             name="source_document_hash_unique",
         )
         self._documents.create_index([("published_date", ASCENDING)])
-        self._sources.create_index([("source_id", ASCENDING)], unique=True, name="source_id_unique")
+        self._sources.create_index(
+            [("source_id", ASCENDING)], unique=True, name="source_id_unique"
+        )
         self._sources.create_index([("authority", ASCENDING), ("enabled", ASCENDING)])
         self._runs.create_index(
             [("source", ASCENDING), ("recorded_at", ASCENDING)],
             name="source_recorded_at",
         )
         self._runs.create_index([("recorded_at", ASCENDING)], name="recorded_at")
+        self.ensure_chunk_indexes()
+        self._artifacts.create_index(
+            [("document_id", ASCENDING), ("file_hash", ASCENDING)],
+            unique=True,
+            name="document_file_unique",
+        )
+        self._provisions.create_index(
+            [("provision_id", ASCENDING)], unique=True, name="provision_id_unique"
+        )
+        self._relationships.create_index(
+            [("source.id", ASCENDING), ("relationship_type", ASCENDING)]
+        )
+        self._relationships.create_index(
+            [("target.id", ASCENDING), ("relationship_type", ASCENDING)]
+        )
+        self._jobs.create_index([("source_id", ASCENDING), ("started_at", ASCENDING)])
+        self._jobs.create_index([("status", ASCENDING), ("current_stage", ASCENDING)])
+        self._processing_runs.create_index(
+            [
+                ("document_id", ASCENDING),
+                ("process_type", ASCENDING),
+                ("started_at", ASCENDING),
+            ]
+        )
+
+    def ensure_chunk_indexes(self) -> None:
+        self._chunks.create_index(
+            [("chunk_id", ASCENDING)], unique=True, name="chunk_id_unique"
+        )
+        self._chunks.create_index(
+            [
+                ("source", ASCENDING),
+                ("document_hash", ASCENDING),
+                ("chunk_index", ASCENDING),
+            ],
+            unique=True,
+            name="source_document_chunk_unique",
+        )
+        self._chunks.create_index(
+            [("document_hash", ASCENDING), ("embedding_model", ASCENDING)]
+        )
+        self._chunks.create_index([("text", "text")], name="chunk_text")
 
     def sync_sources(self, sources: list[RegulatorySource]) -> None:
         now = datetime.now(UTC)
@@ -114,6 +173,31 @@ class MongoDocumentRepository:
                 upsert=True,
             )
 
+    def ensure_vector_index(self, dimensions: int) -> None:
+        """Create the Atlas Vector Search index separately from ordinary BSON indexes."""
+        name = "document_chunks_vector"
+        if any(
+            index.get("name") == name for index in self._chunks.list_search_indexes()
+        ):
+            return
+        definition = {
+            "fields": [
+                {
+                    "type": "vector",
+                    "path": "embedding",
+                    "numDimensions": dimensions,
+                    "similarity": "cosine",
+                },
+                {"type": "filter", "path": "source"},
+                {"type": "filter", "path": "document_type"},
+                {"type": "filter", "path": "published_date"},
+                {"type": "filter", "path": "document_hash"},
+            ]
+        }
+        self._chunks.create_search_index(
+            SearchIndexModel(definition=definition, name=name, type="vectorSearch")
+        )
+
     def upsert(self, document: RegulatoryDocument) -> str:
         payload = to_bson(document.model_dump(mode="python"))
         result = self._documents.update_one(
@@ -122,7 +206,11 @@ class MongoDocumentRepository:
                 "document_hash": document.document_hash,
             },
             {
-                "$set": {**payload, "source": document.source.value, "updated_at": datetime.now(UTC)},
+                "$set": {
+                    **payload,
+                    "source": document.source.value,
+                    "updated_at": datetime.now(UTC),
+                },
                 "$setOnInsert": {"created_at": datetime.now(UTC)},
             },
             upsert=True,
@@ -131,15 +219,71 @@ class MongoDocumentRepository:
             return "inserted"
         return "updated" if result.modified_count else "unchanged"
 
+    def iter_documents(
+        self, source: Source | None, limit: int
+    ) -> list[RegulatoryDocument]:
+        query = {"source": source.value} if source is not None else {}
+        cursor = (
+            self._documents.find(query, {"_id": 0})
+            .sort([("published_date", -1), ("document_hash", 1)])
+            .limit(limit)
+        )
+        return [RegulatoryDocument.model_validate(record) for record in cursor]
+
     def record_run(self, summary: RunSummary) -> None:
         now = datetime.now(UTC)
         self._runs.insert_one({**summary.model_dump(mode="python"), "recorded_at": now})
         self._sources.update_many(
             {"authority": summary.source.value, "enabled": True},
-            {"$set": {
-                "last_checked_at": now,
-                "last_run_status": "failed" if summary.failed else "succeeded",
-            }},
+            {
+                "$set": {
+                    "last_checked_at": now,
+                    "last_run_status": "failed" if summary.failed else "succeeded",
+                }
+            },
+        )
+
+    def chunks_current(
+        self, document: RegulatoryDocument, model: str, expected_count: int
+    ) -> bool:
+        current_count = self._chunks.count_documents(
+            {
+                "source": document.source.value,
+                "document_hash": document.document_hash,
+                "content_hash": document.content_hash,
+                "embedding_model": model,
+            }
+        )
+        total_count = self._chunks.count_documents(
+            {"source": document.source.value, "document_hash": document.document_hash}
+        )
+        return current_count == expected_count and total_count == expected_count
+
+    def replace_chunks(
+        self, document: RegulatoryDocument, chunks: list[DocumentChunk]
+    ) -> None:
+        now = datetime.now(UTC)
+        self._chunks.bulk_write(
+            [
+                ReplaceOne(
+                    {
+                        "source": document.source.value,
+                        "document_hash": document.document_hash,
+                        "chunk_index": chunk.chunk_index,
+                    },
+                    {**to_bson(chunk.model_dump(mode="python")), "updated_at": now},
+                    upsert=True,
+                )
+                for chunk in chunks
+            ],
+            ordered=True,
+        )
+        self._chunks.delete_many(
+            {
+                "source": document.source.value,
+                "document_hash": document.document_hash,
+                "chunk_index": {"$gte": len(chunks)},
+            }
         )
 
 
@@ -150,8 +294,23 @@ class NullDocumentRepository:
     def upsert(self, document: RegulatoryDocument) -> str:
         return "unchanged"
 
+    def iter_documents(
+        self, source: Source | None, limit: int
+    ) -> list[RegulatoryDocument]:
+        return []
+
     def sync_sources(self, sources: list[RegulatorySource]) -> None:
         pass
 
     def record_run(self, summary: RunSummary) -> None:
+        pass
+
+    def chunks_current(
+        self, document: RegulatoryDocument, model: str, expected_count: int
+    ) -> bool:
+        return False
+
+    def replace_chunks(
+        self, document: RegulatoryDocument, chunks: list[DocumentChunk]
+    ) -> None:
         pass

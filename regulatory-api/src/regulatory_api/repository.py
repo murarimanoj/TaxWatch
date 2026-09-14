@@ -70,10 +70,10 @@ class DashboardRepository:
             page_size=page_size,
         )
 
-    def overview(self) -> Overview:
+    def overview(self, year: int | None = None) -> Overview:
         authorities = []
         for source in Authority:
-            documents = self.documents(source=source, page_size=2)
+            documents = self.documents(source=source, year=year, page_size=3)
             latest = documents.items[0] if documents.items else None
             run = self.database.ingestion_runs.find_one(
                 {"source": source.value}, sort=[("recorded_at", -1), ("_id", -1)]
@@ -104,3 +104,18 @@ class DashboardRepository:
         return self.database.regulatory_documents.find_one(
             {"source": source.value, "document_hash": document_hash}, {"_id": 0}
         )
+
+    def publication_years(self, source: Authority | None = None) -> list[int]:
+        filters: dict[str, Any] = {"published_date": {"$type": "date"}}
+        if source is not None:
+            filters["source"] = source.value
+        records = self.database.regulatory_documents.aggregate(
+            [
+                {"$match": filters},
+                {"$group": {"_id": {"$year": "$published_date"}}},
+                {"$match": {"_id": {"$gte": 1900, "$lte": 9998}}},
+                {"$sort": {"_id": -1}},
+            ],
+            maxTimeMS=5000,
+        )
+        return [record["_id"] for record in records]

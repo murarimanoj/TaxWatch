@@ -5,7 +5,8 @@ from .domain import RegulatoryDocument, RunSummary
 from .extraction import ContentExtractor
 from .hashing import content_hash, document_hash
 from .http import HttpClient
-from .ports import DocumentRepository, SourceAdapter
+from .ports import DocumentRepository, Embedder, SourceAdapter
+from .processing import DocumentChunkProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -18,12 +19,23 @@ class IngestionPipeline:
         extractor: ContentExtractor,
         repository: DocumentRepository,
         browser: BrowserClient | None = None,
+        embedder: Embedder | None = None,
+        chunk_size: int = 2400,
+        chunk_overlap: int = 300,
     ) -> None:
         self.adapter = adapter
         self.client = client
         self.extractor = extractor
         self.repository = repository
         self.browser = browser
+        self.embedder = embedder
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+        self.chunk_processor = (
+            DocumentChunkProcessor(repository, embedder, chunk_size, chunk_overlap)
+            if embedder is not None
+            else None
+        )
 
     def run(self, limit: int) -> RunSummary:
         summary = RunSummary(source=self.adapter.source)
@@ -35,7 +47,9 @@ class IngestionPipeline:
                     target = str(candidate.attachment_url or candidate.detail_url)
                     if candidate.metadata.get("transport") == "playwright":
                         if self.browser is None:
-                            raise RuntimeError("Playwright transport is configured but unavailable")
+                            raise RuntimeError(
+                                "Playwright transport is configured but unavailable"
+                            )
                         referer = candidate.metadata.get("referer")
                         if referer:
                             response = self.browser.download(target, referer)
@@ -43,8 +57,12 @@ class IngestionPipeline:
                             response = self.browser.get(target)
                     else:
                         response = self.client.get(target)
-                    content_type = response.headers.get("content-type", "application/octet-stream")
-                    text = self.extractor.extract(response.content, content_type, target)
+                    content_type = response.headers.get(
+                        "content-type", "application/octet-stream"
+                    )
+                    text = self.extractor.extract(
+                        response.content, content_type, target
+                    )
                     document = RegulatoryDocument(
                         **candidate.model_dump(),
                         content=text,
@@ -58,6 +76,8 @@ class IngestionPipeline:
                     )
                     outcome = self.repository.upsert(document)
                     setattr(summary, outcome, getattr(summary, outcome) + 1)
+                    if self.chunk_processor is not None:
+                        summary.chunks_written += self.chunk_processor.process(document)
                 except Exception as exc:  # one bad publication must not abort the batch
                     logger.exception("Failed to ingest %s", candidate.detail_url)
                     summary.failed += 1

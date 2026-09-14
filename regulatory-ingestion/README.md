@@ -63,6 +63,8 @@ Main responsibilities:
 - `pipeline.py`: source-independent orchestration and per-document error isolation.
 - `extraction.py`: PDF and HTML text extraction.
 - `repository.py`: MongoDB indexes, source synchronization, and idempotent writes.
+- `chunking.py` and `embeddings.py`: bounded overlapping text chunks and embedding calls.
+- `processing.py`: shared chunk/embedding processor and stored-document backfill.
 - `jobs.py`: independent regulator jobs for future schedulers.
 - `config/sources.toml`: source URLs and document categories.
 
@@ -74,14 +76,17 @@ regulatory-ingestion/
 ├── src/regulatory_ingestion/
 │   ├── adapters/{base,cbdt,gst,rbi,sebi}.py
 │   ├── browser.py
+│   ├── chunking.py
 │   ├── cli.py
 │   ├── config.py
 │   ├── domain.py
+│   ├── embeddings.py
 │   ├── extraction.py
 │   ├── hashing.py
 │   ├── http.py
 │   ├── jobs.py
 │   ├── pipeline.py
+│   ├── processing.py
 │   ├── ports.py
 │   ├── registry.py
 │   └── repository.py
@@ -132,6 +137,12 @@ load automatically from `.env`; exported environment variables take precedence.
 | `PLAYWRIGHT_CHANNEL` | No | `chrome` | Installed browser channel used by Playwright |
 | `PLAYWRIGHT_POPUP_TIMEOUT_SECONDS` | No | `90` | Maximum wait for a browser-driven document link to open |
 | `PLAYWRIGHT_USER_AGENT` | No | Chrome-compatible value | User-agent used by browser-backed sources |
+| `EMBEDDINGS_ENABLED` | No | `false` | Generate and persist vectors during ingestion |
+| `OPENAI_API_KEY` | If embeddings enabled | None | Embeddings API credential |
+| `EMBEDDING_MODEL` | No | `text-embedding-3-small` | Embedding model |
+| `EMBEDDING_DIMENSIONS` | No | `1536` | Vector length; must match Atlas index |
+| `CHUNK_SIZE_CHARS` | No | `2400` | Maximum characters per chunk |
+| `CHUNK_OVERLAP_CHARS` | No | `300` | Overlap between adjacent chunks |
 
 Alternatively, load credentials from an external file (replace the path below):
 
@@ -175,13 +186,38 @@ Create indexes and synchronize configured sources without scraping:
 
 ```bash
 reg-ingest init-db
+reg-ingest init-vector-index
 ```
 
 This upserts one `regulatory_sources` record for every configured page. Entries
 removed from `sources.toml` are preserved for audit history and marked
 `enabled: false`.
 
+`init-vector-index` requests the Atlas Vector Search index named
+`document_chunks_vector` on the `embedding` field. Atlas builds it asynchronously;
+check its status in Atlas before using vector queries. This requires an Atlas tier
+with Vector Search support. If the embedding dimensions change, recreate the search
+index to match.
+
 ## Running ingestion
+
+To chunk and embed documents that are already in `regulatory_documents`, without
+fetching source websites again, set `MONGODB_URI` and `OPENAI_API_KEY` and run:
+
+```bash
+reg-ingest embed-stored --source cbdt --limit 100
+reg-ingest embed-stored --source rbi --limit 100
+reg-ingest embed-stored --source sebi --limit 100
+```
+
+Omit `--source` to process all regulators. The command reads stored document text,
+creates overlapping chunks, generates embeddings, and saves them in
+`document_chunks`. It skips documents whose chunks already match the current
+content hash and embedding model; use `--force` to regenerate them. `--limit`
+caps the number of documents scanned, and the command prints a JSON summary.
+`EMBEDDINGS_ENABLED` only controls embedding during website ingestion; it is not
+required for this explicit backfill command. Run `reg-ingest init-vector-index`
+once to enable Atlas vector queries over the saved embeddings.
 
 Run one regulator independently:
 
@@ -208,7 +244,7 @@ Run all regulators sequentially:
 reg-ingest run-all --limit 10
 ```
 
-Exercise discovery and extraction without MongoDB writes:
+Exercise discovery, extraction, chunking, and embedding without MongoDB writes:
 
 ```bash
 reg-ingest run rbi --limit 3 --dry-run
@@ -220,19 +256,39 @@ List supported identifiers:
 reg-ingest sources
 ```
 
+Set `EMBEDDINGS_ENABLED=true` and supply `OPENAI_API_KEY` to activate chunk/vector
+writes. Dry runs also call the embedding API when enabled, but do not write MongoDB.
+Embedding failures are reported per document. Run summaries include `chunks_written`.
+Re-runs skip embedding when the document content, model, and chunk count are current.
+
 Commands return JSON containing `discovered`, `inserted`, `updated`, `unchanged`,
-`failed`, and per-item errors. A run exits with status `1` when discovery or a
+`chunks_written`, `failed`, and per-item errors. A run exits with status `1` when discovery or a
 document operation fails.
 
 ## MongoDB collections
 
-The current MVP uses three collections:
+The core regulatory MVP defines eight collections, plus the existing run-history
+collection. This release writes documents and chunks; the remaining core collections
+have typed models and indexes ready for their later processing stages.
 
 | Collection | Purpose | Creation behavior |
 |---|---|---|
 | `regulatory_sources` | Authorities, categories, adapters, URLs, and latest run state | Created by `init-db` or a real run |
 | `regulatory_documents` | Normalized metadata and extracted content | Index created by `init-db`; records written during ingestion |
+| `document_chunks` | Chunk text, citation metadata, and numeric embeddings for Atlas Vector Search | BSON indexes created by `init-db`; records written when embeddings are enabled |
+| `document_artifacts` | Original file metadata and future object-storage references | Indexed now; artifact persistence awaits object storage |
+| `regulatory_provisions` | Acts, sections, rules, and forms | Indexed now; populated by later enrichment |
+| `document_relationships` | Verified amendment, clarification, and reference edges | Indexed now; populated by later analysis |
+| `ingestion_jobs` | Per-document technical stage and retry status | Indexed now; job-state writer is a later stage |
+| `processing_runs` | AI processing audit history | Indexed now; populated by later AI stages |
 | `ingestion_runs` | Run totals and errors | Collection and indexes created by `init-db`; records written after real runs |
+
+Each chunk stores a stable `chunk_id`, `document_id` (currently the stable
+`document_hash`), `source`, `document_type`, `title`,
+`published_date`, `detail_url`, `chunk_index`, `text`, `embedding`,
+`embedding_model`, and `content_hash`. This keeps citations and source/date filters
+alongside the vector. The unique `(source, document_hash, chunk_index)` key makes
+reprocessing idempotent; surplus chunks are removed when a document becomes shorter.
 
 Example `regulatory_sources` record:
 
@@ -310,7 +366,6 @@ Browser failures remain visible in the ingestion-run error summary.
 
 - Store original PDFs in S3 or Azure Blob Storage and add `document_artifacts`.
 - Add OCR for scanned PDFs behind `ContentExtractor`.
-- Add chunking and Atlas Vector Search in `document_chunks`.
 - Add `regulatory_provisions` and `document_relationships`.
 - Add tax-intelligence, relationship-analysis, and processing-run stages.
 - Add timed scheduling around the existing independent source commands.

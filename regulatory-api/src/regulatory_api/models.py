@@ -5,10 +5,11 @@ from pydantic import BaseModel, Field
 
 
 class Authority(StrEnum):
-    RBI = "rbi"
     CBDT = "cbdt"
-    SEBI = "sebi"
     GST = "gst"
+    MCA = "mca"
+    RBI = "rbi"
+    SEBI = "sebi"
 
 
 class Document(BaseModel):

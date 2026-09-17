@@ -1,4 +1,5 @@
 import logging
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from threading import BoundedSemaphore
@@ -22,6 +23,8 @@ from .chat import (
 from .embeddings import QueryEmbedder
 from .llm import LangChainClient
 from .models import Authority, DocumentDetail, DocumentPage, Overview
+from .qa.orchestrator import ChatOrchestrator
+from .regulatory_intelligence.service import IntelligenceService
 from .repository import DashboardRepository
 
 logger = logging.getLogger(__name__)
@@ -35,8 +38,11 @@ class Settings(BaseSettings):
     embedding_dimensions: int = 1536
     vector_index_name: str = "document_chunks_vector"
     chat_diagnostics_enabled: bool = False
+    chat_multi_agent_enabled: bool = True
     mongodb_uri: str | None = None
     mongodb_database: str = "taxwatch"
+    phase3_api_token: SecretStr | None = None
+    phase3_tenant_id: str | None = None
     api_cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
 
@@ -81,7 +87,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=settings.api_cors_origins,
         allow_methods=["GET", "POST"],
-        allow_headers=["Accept", "Content-Type"],
+        allow_headers=["Accept", "Content-Type", "Authorization"],
     )
 
     @application.exception_handler(PyMongoError)
@@ -129,6 +135,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> list[int]:
         return repository.publication_years(source)
 
+    @application.get("/api/documents/{source}/{document_hash}/intelligence")
+    def intelligence(source: Authority, document_hash: str, repository: Repository):
+        return {
+            "intelligence": IntelligenceService(repository.database).get_intelligence(
+                source.value, document_hash
+            )
+        }
+
+    @application.get("/api/client-alerts")
+    def client_alerts(request: Request, repository: Repository):
+        # Single-tenant MVP credential; tenant never comes from query parameters.
+        if not settings.phase3_api_token or not settings.phase3_tenant_id:
+            raise HTTPException(503, "Private alerts are not configured")
+        expected = "Bearer " + settings.phase3_api_token.get_secret_value()
+        supplied = request.headers.get("Authorization", "")
+        if not secrets.compare_digest(supplied.encode(), expected.encode()):
+            raise HTTPException(401, "Authentication required")
+        return {
+            "items": IntelligenceService(repository.database).alerts(
+                settings.phase3_tenant_id
+            )
+        }
+
     @application.post("/api/chat", response_model=ChatResponse)
     def chat(payload: ChatRequest, repository: Repository) -> ChatResponse:
         if (
@@ -141,7 +170,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not chat_slots.acquire(blocking=False):
             raise HTTPException(429, "Chat is busy. Please try again shortly.")
         try:
-            service = ChatService(
+            service_class = (
+                ChatOrchestrator if settings.chat_multi_agent_enabled else ChatService
+            )
+            service = service_class(
                 PublicationSearch(
                     repository.database,
                     QueryEmbedder(

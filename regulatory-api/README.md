@@ -10,8 +10,9 @@ Requires Python 3.11 or newer. Use this project's own virtual environment:
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
-cp .env.example .env
 ```
+
+Create a local `.env` with the settings below; never commit credentials.
 
 Set `MONGODB_URI` and `MONGODB_DATABASE` in `.env` to the same database used by
 ingestion, or export them in your shell. Credentials are never sent to the UI.
@@ -35,6 +36,47 @@ The API does not run ingestion or modify database indexes. An unavailable or
 unconfigured database returns HTTP 503. Populate data using the sibling ingestion
 project's commands.
 
+## Phase 3: relationships, impact and alert drafts
+
+The administrative batch CLI supports one **Relationship Agent** (references,
+amendments, clarifications, supersessions and rescissions), followed by a **Tax
+Intelligence Agent**. Results are source-quoted drafts for CA review. Document
+details display stored intelligence without additional model calls.
+
+```bash
+.venv/bin/python -m regulatory_api.regulatory_intelligence.cli init-db
+.venv/bin/python -m regulatory_api.regulatory_intelligence.cli analyze-document --source cbdt --document-hash DOCUMENT_HASH
+```
+
+Omit the hash to analyze all documents for a source; use `--source` on review for
+a bulk decision (instead of `--analysis-id`):
+
+```bash
+.venv/bin/python -m regulatory_api.regulatory_intelligence.cli analyze-document --source cbdt
+.venv/bin/python -m regulatory_api.regulatory_intelligence.cli review --source cbdt --reviewer CA_IDENTIFIER --decision approved
+```
+
+Both batches continue after per-record failures and print a final JSON summary
+with completed IDs and failures. Analysis also reports skipped existing runs.
+Any failures produce exit code 1. Review updates both impacts and relationships
+transactionally; MongoDB Atlas or another transaction-capable replica set/sharded
+cluster is required. Bulk review includes pending and same-decision records (to
+repair previously pending relationships), but does not reverse opposite decisions.
+
+Failed analysis runs store `error_type`, `error_message`, and `error_trace` in
+`processing_runs`. Traces include chained exceptions but not stack-frame locals.
+Configured credentials and common secret patterns are redacted; messages/traces
+are capped at 8,000/32,000 characters plus a truncation marker. Diagnostics may
+still contain source text from validation errors: keep this collection restricted
+to operators. Successful retries clear the previous error fields. Failures before
+a run is claimed, or while MongoDB is unavailable, cannot use this run-error path.
+
+See the [step-by-step Phase 3 guide](../docs/phase3-design.md) for review, client
+import, matching, private alert authentication and MVP limits. The CLI creates
+Phase 3 indexes; the HTTP API remains read-only. Chat can now read approved
+relationship context through the multi-agent flow described below.
+Personalized alerts are stored drafts, not sent messages.
+
 ## Validation
 
 ```bash
@@ -49,6 +91,29 @@ Add authentication at the API or gateway before exposing private ingestion data.
 
 
 ## Chat and agentic retrieval
+
+### Multi-agent Q&A (default)
+
+`POST /api/chat` now uses a conversation router, controlled retrieval, specialist
+agents, independent evidence review and a constrained answer composer. One
+Relationship Agent handles all relationship types. Current-position questions run
+Relationship Analysis before Tax Intelligence; comparisons use a Comparison Agent.
+
+See [chat architecture and configuration](../docs/chat-architecture.md) for the
+step-by-step flow, routes, limits and diagnostics. The existing chat UI and response
+format are retained. Optional `as_of: "YYYY-MM-DD"` is a legal-analysis date,
+not the publication `year` filter.
+
+```dotenv
+CHAT_MULTI_AGENT_ENABLED=true
+```
+
+This defaults to true. Set it to false to restore the legacy loop documented below.
+Normal requests use four model stages (five for current-position/comparison), with
+a shared six-logical-call budget. Transport retries are separate. Chat is read-only
+and does not query private client profiles or write analysis records.
+
+### Shared setup and legacy retrieval loop
 
 `POST /api/chat` answers questions against ingested publication text. Configure
 these values in **regulatory-api/.env**, then restart the API:
@@ -86,7 +151,7 @@ original URL, publication date, and retrieved passage. Optional `history` accept
 up to ten user/assistant messages. History helps interpret follow-ups but is not
 considered evidence; each answer retrieves its own supporting passages.
 
-Design and limits:
+Legacy-loop design and shared retrieval limits (`CHAT_MULTI_AGENT_ENABLED=false`):
 
 - The server-owned system prompt is in `src/regulatory_api/chat.py`. It directs
   the model to search, refine queries, cite evidence, and explain uncertainty.
@@ -144,8 +209,9 @@ Chat requests also accept optional `year` (1900–9998). The selected publicatio
 ### LangChain integration
 
 `src/regulatory_api/llm.py` owns model configuration, LangChain `bind_tools` /
-`invoke`, and provider error translation. `chat.py` owns the retrieval loop,
-server-enforced source/year filters, and citation checks. Conversation context
+`invoke`, and provider error translation. `qa/` owns the default multi-agent flow;
+`chat.py` owns shared retrieval and the legacy loop, server-enforced source/year
+filters, and legacy citation checks. Legacy conversation context
 uses LangChain `SystemMessage`, `HumanMessage`, `AIMessage`, and `ToolMessage`.
 The full returned AI message is preserved for subsequent model calls, including
 Responses API content blocks. Tool-call IDs link each result to its request.
@@ -154,9 +220,9 @@ The bounded loop remains explicit so the application controls when retrieval can
 run and validates citations before returning a result. It does not use an
 unrestricted AgentExecutor or add LangGraph persistence. The existing `/api/chat`
 request/response format, UI, `OPENAI_API_KEY`, and `CHAT_MODEL` settings are unchanged.
-Requests still disable provider response storage, use a 30-second timeout and
-2,500 output-token limit, and now explicitly disable SDK retries to preserve the
-six-call budget. Errors are logged without provider payloads or traceback content.
+Requests disable provider response storage and use a 30-second transport timeout
+and 2,500 output-token limit. The transport retries temporary provider failures up
+to three times; this is separate from the six-logical-call application budget.
 LangSmith tracing is not enabled by this application; enabling it separately can
 transmit prompts and retrieved content to a tracing service.
 

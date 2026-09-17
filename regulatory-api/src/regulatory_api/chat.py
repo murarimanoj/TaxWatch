@@ -3,7 +3,7 @@
 import json
 import logging
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -54,6 +54,7 @@ class ChatRequest(BaseModel):
     source: Authority | None = None
     year: int | None = Field(default=None, ge=1900, le=9998)
     history: list[ChatMessage] = Field(default_factory=list, max_length=10)
+    as_of: date | None = None
 
 
 class Citation(BaseModel):

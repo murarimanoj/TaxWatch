@@ -401,7 +401,7 @@ def test_chat_endpoint_sanitizes_provider_failure() -> None:
     )
     app.dependency_overrides[get_repository] = lambda: MagicMock()
     with patch(
-        "regulatory_api.app.ChatService.answer", side_effect=ChatError("private detail")
+        "regulatory_api.app.ChatOrchestrator.answer", side_effect=ChatError("private detail")
     ), TestClient(app) as client:
         response = client.post("/api/chat", json={"question": "Hi"})
         assert response.status_code == 502

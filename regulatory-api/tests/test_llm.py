@@ -85,13 +85,14 @@ def test_langchain_responses_request_and_tool_parsing() -> None:
 
 
 @pytest.mark.parametrize("status", [401, 429, 500])
-def test_provider_errors_are_translated_without_retries(status: int) -> None:
+def test_provider_errors_are_translated_after_bounded_retries(status: int) -> None:
     requests = []
 
     def handle(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         return httpx.Response(
             status,
+            headers={"retry-after-ms": "1"},
             json={
                 "error": {
                     "message": "private detail",
@@ -112,7 +113,7 @@ def test_provider_errors_are_translated_without_retries(status: int) -> None:
             client.respond([HumanMessage(content="Question")], TOOLS)
     assert "private detail" not in str(error.value)
     assert error.value.__cause__ is not None
-    assert len(requests) == 1
+    assert len(requests) == (1 if status == 401 else 4)
 
 
 @pytest.mark.parametrize(
@@ -144,3 +145,53 @@ def test_final_step_only_binds_finish_tool() -> None:
         client = LangChainClient("test-key", "gpt-4.1")
         client.respond([HumanMessage(content="Question")], [TOOLS[1]])
         assert factory.return_value.bind_tools.call_args.args[0] == [TOOLS[1]]
+
+
+def test_rate_limit_recovers_on_retry() -> None:
+    requests = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(
+                429,
+                headers={"retry-after-ms": "1"},
+                json={
+                    "error": {
+                        "message": "Temporary token limit",
+                        "type": "tokens",
+                        "code": "rate_limit_exceeded",
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_retry",
+                "object": "response",
+                "created_at": 1,
+                "model": "gpt-4.1",
+                "status": "completed",
+                "output": [
+                    {
+                        "id": "fc_retry",
+                        "type": "function_call",
+                        "call_id": "call_retry",
+                        "name": "finish",
+                        "arguments": json.dumps({"answer": "Recovered"}),
+                        "status": "completed",
+                    }
+                ],
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as transport:
+
+        def make_model(**kwargs: object) -> ChatOpenAI:
+            return ChatOpenAI(**kwargs, http_client=transport)
+
+        with patch("regulatory_api.llm.ChatOpenAI", side_effect=make_model):
+            client = LangChainClient("test-key", "gpt-4.1")
+        response = client.respond([HumanMessage(content="Question")], TOOLS)
+    assert len(requests) == 2
+    assert response.tool_calls[0]["args"] == {"answer": "Recovered"}

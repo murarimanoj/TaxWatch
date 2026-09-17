@@ -207,7 +207,6 @@ def embed_stored(
     if summary.failed:
         raise typer.Exit(code=1)
 
-
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"

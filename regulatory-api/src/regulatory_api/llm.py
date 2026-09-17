@@ -27,7 +27,8 @@ class LangChainClient:
             output_version="responses/v1",
             store=False,
             timeout=30,
-            max_retries=0,
+            # The SDK honors Retry-After and uses backoff for temporary 429/5xx errors.
+            max_retries=3,
             max_tokens=2500,
         )
 

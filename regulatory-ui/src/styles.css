@@ -19,3 +19,20 @@ main{--tile-columns:2;--tile-gap:20px}.source-grid{grid-template-columns:repeat(
 .source-card .previews time{font-size:inherit;font-weight:400;color:#727970}.source-card .notification-separator{color:#727970}
 
 .source-card .notification-excerpt{margin-top:4px;font-size:.75rem;line-height:1.5;font-weight:400;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.source-card .previews time{white-space:nowrap}
+
+/* Original notification and its stored AI analysis remain separate cards. */
+.notification-detail-layout{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:24px;align-items:start}
+.notification-detail-layout>.detail{min-width:0;overflow-wrap:anywhere}
+.intelligence-panel{min-width:0;background:#fff;border:1px solid var(--line);border-radius:12px;padding:28px;line-height:1.65;font-size:.9375rem;overflow-wrap:anywhere}
+.intelligence-panel h3{font-size:1.125rem;margin:0 0 20px;padding-bottom:16px;border-bottom:1px solid var(--line)}
+.intelligence-panel h4{font-size:.9375rem;margin:24px 0 8px}
+.intelligence-panel p{margin:12px 0;white-space:pre-wrap}
+.intelligence-panel ul{margin:8px 0;padding-left:20px}
+.intelligence-panel li+li{margin-top:8px}
+.intelligence-panel details{margin-top:14px}
+.intelligence-panel summary{cursor:pointer;color:var(--green)}
+.intelligence-panel blockquote{margin:14px 0;padding-left:14px;border-left:3px solid #a8c0ad;white-space:pre-wrap}
+.intelligence-panel blockquote footer{margin-top:8px;font-size:.8125rem;color:var(--muted)}
+.intelligence-panel [role="status"]{color:var(--muted)}
+@media(max-width:900px){.notification-detail-layout{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:700px){.intelligence-panel{padding:22px}}
